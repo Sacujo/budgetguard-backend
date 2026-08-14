@@ -1,0 +1,1052 @@
+openapi: "3.0.3"
+
+info:
+  title: "BudgetGuard API"
+  description: |
+    Бэкенд приложения учёта доходов и расходов BudgetGuard.
+
+    Модель данных офлайн-первая: идентификаторы генерирует клиент (UUIDv7),
+    удаление мягкое, синхронизация идёт по монотонному курсору `revision`.
+
+    Разрешение конфликтов — last-write-wins по полю `updatedAt`, которое
+    передаёт клиент. Часы клиента принимаются на веру; это осознанное
+    упрощение для персонального приложения с несколькими устройствами.
+  version: "1.0.0"
+
+servers:
+  - url: "http://localhost:8080/api/v1"
+    description: "Локальная разработка"
+  - url: "https://api.budgetguard.example/api/v1"
+    description: "Production"
+
+tags:
+  - name: auth
+    description: "Регистрация, вход, обновление токенов"
+  - name: accounts
+    description: "Счета пользователя"
+  - name: categories
+    description: "Категории доходов и расходов"
+  - name: transactions
+    description: "Операции по счетам"
+  - name: sync
+    description: "Синхронизация офлайн-изменений"
+  - name: system
+    description: "Служебные эндпоинты"
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  /healthz:
+    get:
+      tags: [system]
+      summary: "Проверка живости сервиса"
+      security: []
+      responses:
+        '200':
+          description: "Сервис работает"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  version:
+                    type: string
+                    example: "1.0.0"
+                required: [status]
+        '503':
+          description: "Сервис недоступен — нет соединения с БД"
+
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: "Регистрация нового пользователя"
+      description: |
+        Создаёт пользователя и наполняет его аккаунт стартовыми данными:
+        один счёт в рублях и набор категорий по умолчанию.
+
+        Без этого приложение после регистрации оказалось бы пустым и
+        пользователь не смог бы завести ни одной операции.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        '201':
+          description: "Пользователь создан"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '409':
+          description: "Пользователь с таким email уже существует"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: "Вход по email и паролю"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        '200':
+          description: "Успешный вход"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          description: "Неверный email или пароль"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: "Обновление пары токенов"
+      description: "Refresh-токен одноразовый: после использования отзывается."
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+              required: [refreshToken]
+      responses:
+        '200':
+          description: "Новая пара токенов"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '401':
+          description: "Refresh-токен недействителен, истёк или уже использован"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: "Выход — отзыв refresh-токена"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken:
+                  type: string
+              required: [refreshToken]
+      responses:
+        '204':
+          description: "Токен отозван"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+  /me:
+    get:
+      tags: [auth]
+      summary: "Текущий пользователь"
+      responses:
+        '200':
+          description: "Данные пользователя"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+  /accounts:
+    get:
+      tags: [accounts]
+      summary: "Список счетов"
+      parameters:
+        - name: includeDeleted
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: "Включать ли мягко удалённые счета"
+      responses:
+        '200':
+          description: "Счета пользователя"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Account"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+  /accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+    get:
+      tags: [accounts]
+      summary: "Счёт по идентификатору"
+      responses:
+        '200':
+          description: "Счёт"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [accounts]
+      summary: "Создать или обновить счёт"
+      description: |
+        Идентификатор генерирует клиент, поэтому создание и обновление —
+        одна операция. Повторный запрос с теми же данными безопасен.
+
+        Если `updatedAt` в запросе старше серверного, изменение отклоняется
+        с кодом 409 и текущим состоянием в теле ответа.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountWrite"
+      responses:
+        '200':
+          description: "Счёт обновлён"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        '201':
+          description: "Счёт создан"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '409':
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [accounts]
+      summary: "Удалить счёт"
+      description: |
+        Удаление мягкое: проставляется `deletedAt`, запись остаётся в базе
+        и попадает в выдачу синхронизации как надгробие.
+
+        Связанные транзакции не проверяются и не удаляются — они могут
+        прийти позже с офлайн-устройства. Клиент показывает удалённый счёт
+        как неактивный.
+      responses:
+        '204':
+          description: "Счёт удалён"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          $ref: "#/components/responses/NotFound"
+
+  /categories:
+    get:
+      tags: [categories]
+      summary: "Список категорий"
+      parameters:
+        - name: isIncome
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: "Фильтр по типу: true — доходы, false — расходы"
+        - name: includeDeleted
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: "Категории пользователя"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+  /categories/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+    put:
+      tags: [categories]
+      summary: "Создать или обновить категорию"
+      description: |
+        Поле `isIncome` неизменяемо после создания. Смена типа перевернула бы
+        знак всех исторических операций по этой категории, поэтому попытка
+        изменить его отклоняется с кодом 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryWrite"
+      responses:
+        '200':
+          description: "Категория обновлена"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        '201':
+          description: "Категория создана"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '409':
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [categories]
+      summary: "Удалить категорию"
+      description: "Мягкое удаление. Операции по категории сохраняются."
+      responses:
+        '204':
+          description: "Категория удалена"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          $ref: "#/components/responses/NotFound"
+
+  /transactions:
+    get:
+      tags: [transactions]
+      summary: "Операции с фильтрацией"
+      parameters:
+        - name: accountId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: categoryId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: "Начало периода включительно"
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: "Конец периода включительно"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Курсор следующей страницы из поля nextCursor"
+      responses:
+        '200':
+          description: "Страница операций"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionPage"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+  /transactions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+    get:
+      tags: [transactions]
+      summary: "Операция по идентификатору"
+      responses:
+        '200':
+          description: "Операция"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [transactions]
+      summary: "Создать или обновить операцию"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionWrite"
+      responses:
+        '200':
+          description: "Операция обновлена"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        '201':
+          description: "Операция создана"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          description: "Счёт или категория не найдены"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        '409':
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [transactions]
+      summary: "Удалить операцию"
+      responses:
+        '204':
+          description: "Операция удалена"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '404':
+          $ref: "#/components/responses/NotFound"
+
+  /sync:
+    get:
+      tags: [sync]
+      summary: "Получить изменения с момента последней синхронизации"
+      description: |
+        Возвращает все записи с `revision` строго больше переданного `since`,
+        включая мягко удалённые — по ним клиент чистит локальную базу.
+
+        Курсор `revision` монотонен в пределах пользователя и не имеет
+        пропусков: номер выдаётся под блокировкой строки пользователя внутри
+        той же транзакции БД, что и само изменение. Общая последовательность
+        здесь не подходит — при параллельной записи номера коммитятся не по
+        порядку, и клиент, синхронизировавшийся между двумя коммитами, терял
+        бы запись навсегда.
+
+        Ответ может быть неполным: если изменений больше лимита, поле
+        `hasMore` равно true и клиент повторяет запрос с новым `revision`.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: "Последний известный клиенту revision. 0 — полная выгрузка"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 500
+          description: "Максимум записей суммарно по всем сущностям"
+      responses:
+        '200':
+          description: "Изменения"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [sync]
+      summary: "Отправить накопленные офлайн-изменения"
+      description: |
+        Батч применяется в одной транзакции БД в фиксированном порядке:
+        счета, категории, затем операции. Порядок обязателен, потому что
+        операция ссылается на счёт и категорию, которые могли быть созданы
+        в том же батче.
+
+        Операция идемпотентна: вставка идёт через `INSERT ... ON CONFLICT (id)
+        DO UPDATE`, повторная отправка того же батча после обрыва связи
+        ничего не нарушит.
+
+        Записи, проигравшие по last-write-wins, попадают в `conflicts` вместе
+        с актуальным серверным состоянием — клиент обязан принять его.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      responses:
+        '200':
+          description: "Батч обработан"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPushResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        '413':
+          description: "Батч превышает допустимый размер"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        '422':
+          description: "Нарушена целостность — ссылка на несуществующую сущность"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    EntityId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: "UUID сущности, сгенерированный клиентом"
+
+  responses:
+    BadRequest:
+      description: "Некорректные данные запроса"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "Отсутствует или недействителен access-токен"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "Сущность не найдена"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: "Конфликт версий — серверная запись новее"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConflictError"
+
+  schemas:
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          description: "Машиночитаемый код ошибки"
+          enum:
+            - validation_failed
+            - unauthorized
+            - not_found
+            - already_exists
+            - version_conflict
+            - immutable_field
+            - integrity_violation
+            - payload_too_large
+            - internal_error
+          example: "validation_failed"
+        message:
+          type: string
+          description: "Человекочитаемое описание"
+          example: "Поле amount должно быть положительным числом"
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: "Дополнительный контекст, например список невалидных полей"
+      required: [code, message]
+
+    ConflictError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            server:
+              description: "Актуальное состояние записи на сервере"
+              oneOf:
+                - $ref: "#/components/schemas/Account"
+                - $ref: "#/components/schemas/Category"
+                - $ref: "#/components/schemas/Transaction"
+          required: [server]
+
+    Money:
+      type: string
+      pattern: '^-?\d{1,15}(\.\d{1,4})?$'
+      description: |
+        Денежная сумма строкой с точкой в качестве разделителя.
+        Числа с плавающей точкой для денег не используются;
+        в базе — numeric(19,4), в коде — decimal.
+      example: "1000.00"
+
+    RegisterRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          example: "igor@example.com"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          description: "Ограничение сверху продиктовано bcrypt"
+      required: [email, password]
+
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+      required: [email, password]
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+          description: "JWT, время жизни 15 минут"
+        refreshToken:
+          type: string
+          description: "Одноразовый, время жизни 30 дней"
+        expiresIn:
+          type: integer
+          description: "Время жизни access-токена в секундах"
+          example: 900
+        user:
+          $ref: "#/components/schemas/User"
+        revision:
+          type: integer
+          format: int64
+          description: "Текущий курсор синхронизации пользователя"
+          example: 0
+      required: [accessToken, refreshToken, expiresIn, user, revision]
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        createdAt:
+          type: string
+          format: date-time
+      required: [id, email, createdAt]
+
+    SyncMeta:
+      type: object
+      description: "Поля, общие для всех синхронизируемых сущностей"
+      properties:
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          description: "Метка последнего изменения. Основание для last-write-wins"
+        deletedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "Заполнено у мягко удалённых записей"
+        revision:
+          type: integer
+          format: int64
+          readOnly: true
+          description: "Курсор синхронизации. Присваивается сервером"
+      required: [createdAt, updatedAt, revision]
+
+    Account:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+              example: "Основной счёт"
+            emoji:
+              type: string
+              minLength: 1
+              maxLength: 10
+              example: "💵"
+            initialBalance:
+              $ref: "#/components/schemas/Money"
+            balance:
+              allOf:
+                - $ref: "#/components/schemas/Money"
+              readOnly: true
+              description: |
+                Вычисляемое поле: initialBalance плюс сумма всех операций
+                по счёту. На сервере не хранится, поэтому рассинхрон
+                между балансом и операциями невозможен по построению.
+            currency:
+              type: string
+              enum: [RUB, USD, EUR]
+              example: "RUB"
+          required: [id, name, emoji, initialBalance, balance, currency]
+        - $ref: "#/components/schemas/SyncMeta"
+
+    AccountWrite:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 10
+        initialBalance:
+          $ref: "#/components/schemas/Money"
+        currency:
+          type: string
+          enum: [RUB, USD, EUR]
+        updatedAt:
+          type: string
+          format: date-time
+          description: "Момент изменения на клиенте. Используется для разрешения конфликтов"
+      required: [name, emoji, initialBalance, currency, updatedAt]
+
+    Category:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              minLength: 1
+              maxLength: 100
+              example: "Продукты"
+            emoji:
+              type: string
+              minLength: 1
+              maxLength: 10
+              example: "🛒"
+            isIncome:
+              type: boolean
+              description: "Неизменяемо после создания"
+              example: false
+          required: [id, name, emoji, isIncome]
+        - $ref: "#/components/schemas/SyncMeta"
+
+    CategoryWrite:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 10
+        isIncome:
+          type: boolean
+          description: "Учитывается только при создании. Изменение отклоняется"
+        updatedAt:
+          type: string
+          format: date-time
+      required: [name, emoji, isIncome, updatedAt]
+
+    Transaction:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            accountId:
+              type: string
+              format: uuid
+            categoryId:
+              type: string
+              format: uuid
+            amount:
+              allOf:
+                - $ref: "#/components/schemas/Money"
+              description: |
+                Всегда положительная величина. Направление операции
+                определяется полем isIncome связанной категории.
+            transactionDate:
+              type: string
+              format: date-time
+              description: "Момент самой операции, задаётся пользователем"
+            comment:
+              type: string
+              nullable: true
+              maxLength: 500
+              description: |
+                Отсутствие комментария передаётся как null.
+                Пустая строка и null различимы и не подменяют друг друга.
+              example: "Покупка продуктов"
+          required: [id, accountId, categoryId, amount, transactionDate]
+        - $ref: "#/components/schemas/SyncMeta"
+
+    TransactionWrite:
+      type: object
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        categoryId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/Money"
+        transactionDate:
+          type: string
+          format: date-time
+        comment:
+          type: string
+          nullable: true
+          maxLength: 500
+        updatedAt:
+          type: string
+          format: date-time
+      required: [accountId, categoryId, amount, transactionDate, updatedAt]
+
+    TransactionPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaction"
+        nextCursor:
+          type: string
+          nullable: true
+          description: "Курсор следующей страницы. null — данные закончились"
+      required: [items, nextCursor]
+
+    SyncPullResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: "Новый курсор. Клиент сохраняет его после применения изменений"
+          example: 142
+        hasMore:
+          type: boolean
+          description: "Есть ли ещё изменения за пределами лимита"
+        accounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+        categories:
+          type: array
+          items:
+            $ref: "#/components/schemas/Category"
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaction"
+      required: [revision, hasMore, accounts, categories, transactions]
+
+    SyncPushRequest:
+      type: object
+      description: |
+        Все три массива опциональны. Порядок применения задаётся сервером,
+        а не порядком полей в запросе.
+      properties:
+        accounts:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/SyncAccountItem"
+        categories:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/SyncCategoryItem"
+        transactions:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/SyncTransactionItem"
+
+    SyncAccountItem:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
+              description: "Заполнено, если запись удалена на клиенте"
+          required: [id]
+        - $ref: "#/components/schemas/AccountWrite"
+
+    SyncCategoryItem:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
+          required: [id]
+        - $ref: "#/components/schemas/CategoryWrite"
+
+    SyncTransactionItem:
+      allOf:
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            deletedAt:
+              type: string
+              format: date-time
+              nullable: true
+          required: [id]
+        - $ref: "#/components/schemas/TransactionWrite"
+
+    SyncPushResponse:
+      type: object
+      properties:
+        revision:
+          type: integer
+          format: int64
+          description: "Курсор после применения батча"
+          example: 158
+        applied:
+          type: array
+          description: "Идентификаторы принятых записей"
+          items:
+            type: string
+            format: uuid
+        conflicts:
+          type: array
+          description: "Записи, проигравшие по last-write-wins"
+          items:
+            $ref: "#/components/schemas/SyncConflict"
+      required: [revision, applied, conflicts]
+
+    SyncConflict:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        entity:
+          type: string
+          enum: [account, category, transaction]
+        reason:
+          type: string
+          enum: [stale_update, immutable_field, integrity_violation]
+          description: |
+            stale_update — серверная версия новее клиентской;
+            immutable_field — попытка изменить неизменяемое поле;
+            integrity_violation — ссылка на несуществующую сущность.
+        server:
+          description: "Актуальное состояние записи на сервере. null, если записи нет"
+          nullable: true
+          oneOf:
+            - $ref: "#/components/schemas/Account"
+            - $ref: "#/components/schemas/Category"
+            - $ref: "#/components/schemas/Transaction"
+      required: [id, entity, reason, server]
