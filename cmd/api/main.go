@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/Sacujo/budgetguard-backend/internal/config"
+	"github.com/Sacujo/budgetguard-backend/internal/storage/postgres"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -20,6 +23,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pool, err := postgres.New(ctx, cfg.DBUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
